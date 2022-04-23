@@ -1,9 +1,11 @@
 package main
 
 import (
-	"encoding/json"
+	"bytes"
 	"fmt"
+	"log"
 	"math/rand"
+	"net/http"
 	"runtime"
 	"time"
 )
@@ -11,93 +13,141 @@ import (
 type gauge float64
 type counter int64
 
-type Metric struct {
-	Alloc         gauge
-	BuckHashSys   gauge
-	Frees         gauge
-	GCCPUFraction gauge
-	GCSys         gauge
-	HeapAlloc     gauge
-	HeapIdle      gauge
-	HeapInuse     gauge
-	HeapObjects   gauge
-	HeapReleased  gauge
-	HeapSys       gauge
-	LastGC        gauge
-	Lookups       gauge
-	MCacheInuse   gauge
-	MCacheSys     gauge
-	MSpanInuse    gauge
-	MSpanSys      gauge
-	Mallocs       gauge
-	NextGC        gauge
-	NumForcedGC   gauge
-	NumGC         gauge
-	OtherSys      gauge
-	PauseTotalNs  gauge
-	StackInuse    gauge
-	StackSys      gauge
-	Sys           gauge
-	TotalAlloc    gauge
+type mapOfRequests map[string]*http.Request
+type metricRequests func() mapOfRequests
+type gaugesMap map[string]gauge
+type counterMap map[string]counter
 
-	PollCount   counter
-	RandomValue gauge
+const pollInterval = 2 * time.Second
+const reportInterval = 10 * time.Second
+const clientTimeout = time.Second * 5
+const url = "http://127.0.0.1:8080/"
+
+var gauges map[string]gauge
+var counters counterMap
+
+func sendRequest(client *http.Client, fn metricRequests) {
+	metricRequestsMap := fn()
+
+	for _, value := range metricRequestsMap {
+		response, err := client.Do(value)
+
+		if err != nil {
+			log.Println("Error when sending the request", err)
+		}
+
+		defer response.Body.Close()
+	}
+
+}
+
+func gaugeMetricRequests(gauges gaugesMap) mapOfRequests {
+	m := make(mapOfRequests)
+
+	for key, value := range gauges {
+		reqUrl := fmt.Sprintf("%s/update/gauge/%s/%f", url, key, value)
+		request, err := http.NewRequest(http.MethodPost, reqUrl, bytes.NewBufferString(""))
+
+		if err != nil {
+			log.Printf("An error occurred while sending metrics (metricType: gauge, metricName: %s, metricValue: %f", key, value)
+		}
+
+		request.Header.Set("Content-Type", "text/plain")
+
+		m[key] = request
+	}
+
+	return m
+
+}
+
+func counterMetricRequests(counters counterMap) mapOfRequests {
+	m := make(mapOfRequests)
+
+	for key, value := range counters {
+		reqUrl := fmt.Sprintf("%s/update/counter/%s/%d", url, key, value)
+		request, err := http.NewRequest(http.MethodPost, reqUrl, bytes.NewBufferString(""))
+
+		if err != nil {
+			log.Printf("An error occurred while sending metrics (metricType: counter, metricName: %s, metricValue: %d", key, value)
+		}
+
+		request.Header.Set("Content-Type", "text/plain")
+
+		m[key] = request
+	}
+
+	return m
 }
 
 func NewMonitor() {
-	var m Metric
+	gauges := make(map[string]gauge)
+	counters := make(counterMap)
+
 	var rtm runtime.MemStats
-	pollInterval := 2 * time.Second
-	reportInterval := 10 * time.Second
+	var counter counter
+
 	pollTimer := time.NewTicker(pollInterval)
 	reportTimer := time.NewTicker(reportInterval)
+
+	transport := &http.Transport{
+		MaxIdleConns: 30,
+	}
+
+	client := &http.Client{
+		Timeout:   clientTimeout,
+		Transport: transport,
+	}
 
 	time.AfterFunc(0, func() {
 		for {
 			<-reportTimer.C
-			fmt.Println("AfterFunc", m)
+			countersReqFn := func() mapOfRequests { return counterMetricRequests(counters) }
+			gaugesReqFn := func() mapOfRequests { return gaugeMetricRequests(gauges) }
+
+			sendRequest(client, countersReqFn)
+			sendRequest(client, gaugesReqFn)
 		}
 	})
 
 	for {
 		<-pollTimer.C
 
+		counter++
+
 		runtime.ReadMemStats(&rtm)
 
-		m.Alloc = gauge(rtm.Alloc)
-		m.BuckHashSys = gauge(rtm.BuckHashSys)
-		m.Frees = gauge(rtm.Frees)
-		m.GCCPUFraction = gauge(rtm.GCCPUFraction)
-		m.GCSys = gauge(rtm.GCSys)
-		m.HeapAlloc = gauge(rtm.HeapAlloc)
-		m.HeapIdle = gauge(rtm.HeapIdle)
-		m.HeapInuse = gauge(rtm.HeapInuse)
-		m.HeapObjects = gauge(rtm.HeapObjects)
-		m.HeapReleased = gauge(rtm.HeapReleased)
-		m.HeapSys = gauge(rtm.HeapSys)
-		m.LastGC = gauge(rtm.LastGC)
-		m.Lookups = gauge(rtm.Lookups)
-		m.MCacheInuse = gauge(rtm.MCacheInuse)
-		m.MCacheSys = gauge(rtm.MCacheSys)
-		m.MSpanInuse = gauge(rtm.MSpanInuse)
-		m.MSpanSys = gauge(rtm.MSpanSys)
-		m.Mallocs = gauge(rtm.Mallocs)
-		m.NextGC = gauge(rtm.NextGC)
-		m.NumForcedGC = gauge(rtm.NumForcedGC)
-		m.NumGC = gauge(rtm.NumGC)
-		m.OtherSys = gauge(rtm.OtherSys)
-		m.PauseTotalNs = gauge(rtm.PauseTotalNs)
-		m.StackInuse = gauge(rtm.StackInuse)
-		m.StackSys = gauge(rtm.StackSys)
-		m.Sys = gauge(rtm.Sys)
-		m.TotalAlloc = gauge(rtm.TotalAlloc)
+		gauges["Alloc"] = gauge(rtm.Alloc)
+		gauges["BuckHashSys"] = gauge(rtm.BuckHashSys)
+		gauges["Frees"] = gauge(rtm.Frees)
+		gauges["GCCPUFraction"] = gauge(rtm.GCCPUFraction)
+		gauges["GCSys"] = gauge(rtm.GCSys)
+		gauges["HeapAlloc"] = gauge(rtm.HeapAlloc)
+		gauges["HeapIdle"] = gauge(rtm.HeapIdle)
+		gauges["HeapInuse"] = gauge(rtm.HeapInuse)
+		gauges["HeapObjects"] = gauge(rtm.HeapObjects)
+		gauges["HeapReleased"] = gauge(rtm.HeapReleased)
+		gauges["HeapSys"] = gauge(rtm.HeapSys)
+		gauges["LastGC"] = gauge(rtm.LastGC)
+		gauges["Lookups"] = gauge(rtm.Lookups)
+		gauges["MCacheInuse"] = gauge(rtm.MCacheInuse)
+		gauges["MCacheSys"] = gauge(rtm.MCacheSys)
+		gauges["MSpanInuse"] = gauge(rtm.MSpanInuse)
+		gauges["MSpanSys"] = gauge(rtm.MSpanSys)
+		gauges["Mallocs"] = gauge(rtm.Mallocs)
+		gauges["NextGC"] = gauge(rtm.NextGC)
+		gauges["NumForcedGC"] = gauge(rtm.NumForcedGC)
+		gauges["NumGC"] = gauge(rtm.NumGC)
+		gauges["OtherSys"] = gauge(rtm.OtherSys)
+		gauges["PauseTotalNs"] = gauge(rtm.PauseTotalNs)
+		gauges["StackInuse"] = gauge(rtm.StackInuse)
+		gauges["StackSys"] = gauge(rtm.StackSys)
+		gauges["Sys"] = gauge(rtm.Sys)
+		gauges["TotalAlloc"] = gauge(rtm.TotalAlloc)
 
-		m.PollCount += 1
-		m.RandomValue = gauge(rand.Intn(1000000000000000))
+		gauges["RandomValue"] = gauge(rand.Intn(1000000000000000))
 
-		// // Just encode to json and print
-		b, _ := json.Marshal(m)
-		fmt.Println(string(b))
+		counters["PollCount"] = counter
 	}
 }
 
