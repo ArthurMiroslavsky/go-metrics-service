@@ -24,7 +24,7 @@ type counterMap map[string]counter
 const pollInterval = 2 * time.Second
 const reportInterval = 10 * time.Second
 const clientTimeout = time.Second * 5
-const url = "http://127.0.0.1:8080/"
+const url = "http://127.0.0.1:8080"
 
 var gauges map[string]gauge
 var counters counterMap
